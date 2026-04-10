@@ -184,3 +184,13 @@ turbo3 KV preserves multi-step agentic reasoning.
 | 131K | 8,192 MiB | 1,600 MiB | 1,088 MiB |
 
 At 131K context, turbo3 saves 6.4 GiB vs f16. turbo2 saves 6.9 GiB.
+
+### Combined Compression: TurboQuant + TriAttention
+
+| Method | KV Compression | Quality |
+|---|---|---|
+| turbo3 alone | 5.12× | +0.02% PPL |
+| TriAttention 75% alone | 1.33× | -1.3% PPL |
+| **turbo3 + TriAttention 75%** | **~6.8×** | composable |
+
+At 131K context: f16 KV = 8,192 MiB → turbo3 + TriAttention 75% ≈ **1,200 MiB**.
