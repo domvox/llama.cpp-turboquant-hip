@@ -14,7 +14,7 @@
 #include <future>
 #include <regex>
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h>
 #endif
 
@@ -1380,6 +1380,55 @@ void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void *
         *first = std::min(*first, weight->offs);
         *last  = std::max(*last,  weight->offs + ggml_nbytes(tensor));
     }
+}
+
+// Zero-fill padding. For MAP_PRIVATE file mmaps, triggers COW on touched pages (~one page per padded tensor); no-op
+// for anonymous hugetlb. Restores PROT_READ on exit. Linux/Apple-only (uses mprotect); no-op on other platforms.
+void llama_model_loader::zero_padding_in_mapping(uint32_t idx, ggml_context * ctx, ggml_backend_buffer_type_t buft) {
+#if defined(__linux__) || defined(__APPLE__)
+    if (idx >= mappings.size()) {
+        return;
+    }
+    auto & mapping = mappings.at(idx);
+    if (mapping->is_hugetlb()) {
+        // Kernel zero-fills anonymous hugetlb mappings, so padding bytes are already zero; skipping here avoids poisoning the
+        // mapping with PROT_READ before load_all_data completes. and the lockdown happens in load_all_data's cleanup instead.
+        return;
+    }
+    void * base = mapping->addr();
+    const size_t mapsize = mapping->mmap_size();
+
+    if (mprotect(base, mapsize, PROT_READ | PROT_WRITE) != 0) {
+        LLAMA_LOG_WARN("%s: mprotect(RW) failed: %s; skipping pre-bfhp zero-pass\n", __func__, strerror(errno));
+        return;
+    }
+
+    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor; tensor = ggml_get_next_tensor(ctx, tensor)) {
+        const auto * weight = get_weight(ggml_get_name(tensor));
+        if (!weight || weight->idx != idx) {
+            continue;
+        }
+        if (!ggml_is_quantized(tensor->type)) {
+            continue;
+        }
+        if (tensor->view_src != nullptr) {
+            continue;
+        }
+        const size_t orig_size   = ggml_nbytes(tensor);
+        const size_t padded_size = ggml_backend_buft_get_alloc_size(buft, tensor);
+        if (padded_size > orig_size) {
+            memset((char *) base + weight->offs + orig_size, 0, padded_size - orig_size);
+        }
+    }
+
+    if (mprotect(base, mapsize, PROT_READ) != 0) {
+        LLAMA_LOG_WARN("%s: mprotect(RO) restore failed: %s\n", __func__, strerror(errno));
+    }
+#else
+    GGML_UNUSED(idx);
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(buft);
+#endif
 }
 
 void llama_model_loader::load_data_for(struct ggml_tensor * cur) const {

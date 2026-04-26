@@ -547,6 +547,8 @@ struct common_params {
 
     bool single_turn       = false; // single turn chat conversation
 
+    llama_gpu_host_import_mode gpu_host_import = LLAMA_GPU_HOST_IMPORT_AUTO; // bfhp defaults to auto
+
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 
