@@ -40,6 +40,14 @@
 #include <TargetConditionals.h>
 #endif
 
+#ifdef _WIN32
+#    define llama_mmap_ftell _ftelli64
+#    define llama_mmap_fseek _fseeki64
+#else
+#    define llama_mmap_ftell ftello
+#    define llama_mmap_fseek fseeko
+#endif
+
 #ifdef __linux__
 // Older glibc headers may miss these; upstream kernel has had them for years.
 #ifndef MAP_HUGETLB
@@ -243,7 +251,7 @@ struct llama_file::impl {
 
     size_t tell() const {
         if (fd == -1) {
-            long ret = std::ftell(fp);
+            off_t ret = llama_mmap_ftell(fp);
             if (ret == -1) {
                 throw std::runtime_error(format("ftell error: %s", strerror(errno)));
             }
@@ -261,7 +269,7 @@ struct llama_file::impl {
     void seek(size_t offset, int whence) const {
         off_t ret = 0;
         if (fd == -1) {
-            ret = std::fseek(fp, (long) offset, whence);
+            ret = llama_mmap_fseek(fp, offset, whence);
         } else {
             ret = lseek(fd, offset, whence);
         }
