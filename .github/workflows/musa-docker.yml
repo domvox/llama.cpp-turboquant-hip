@@ -1,0 +1,39 @@
+name: MUSA Docker build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/musa-docker.yml'
+      - '.devops/musa.Dockerfile'
+      - 'ggml/src/ggml-cuda/vendors/musa.h'
+      - 'ggml/src/ggml-cuda/mmvq-tq.cu'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: musa-docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+
+      - name: Build MUSA images without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in full light server; do
+            docker build --progress=plain --platform linux/amd64 \
+              --file .devops/musa.Dockerfile --target "$target" \
+              --tag "llama-musa:${target}" .
+          done

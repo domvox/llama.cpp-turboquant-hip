@@ -143,6 +143,9 @@
 #define cudaStreamCaptureModeRelaxed musaStreamCaptureModeRelaxed
 #define cudaStreamBeginCapture musaStreamBeginCapture
 #define cudaStreamEndCapture musaStreamEndCapture
+#define cudaStreamCaptureStatus musaStreamCaptureStatus
+#define cudaStreamIsCapturing musaStreamIsCapturing
+#define cudaStreamCaptureStatusNone musaStreamCaptureStatusNone
 #define cudaOccupancyMaxActiveBlocksPerMultiprocessor musaOccupancyMaxActiveBlocksPerMultiprocessor
 
 typedef __mt_bfloat16 nv_bfloat16;
