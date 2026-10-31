@@ -7797,9 +7797,19 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         ggml_backend_dev_get_props(dev, &props);
         bool buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
+        bool gpu_host_import_enabled;
+
+        // Resolve bfhp state. AUTO --> match hugepages to avoid unnecessarily copying and memory consumption.
+        // ON/OFF are overrides from user flags.
+        switch (params.gpu_host_import) {
+            case LLAMA_GPU_HOST_IMPORT_ON:  gpu_host_import_enabled = true;                break;
+            case LLAMA_GPU_HOST_IMPORT_OFF: gpu_host_import_enabled = false;               break;
+            case LLAMA_GPU_HOST_IMPORT_AUTO:
+            default:                        gpu_host_import_enabled = params.use_hugepages; break;
+        }
 
         std::vector<ggml_backend_buffer_ptr> bufs;
-        if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
+        if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && gpu_host_import_enabled) {
             GGML_ASSERT(!ml.no_alloc);
             for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
                 // only the mmap region containing the tensors in the model is mapped to the backend buffer
@@ -7812,6 +7822,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 if (first >= last) {
                     continue;
                 }
+                ml.zero_padding_in_mapping(idx, ctx, buft); // Zero out padding before importing host buffer (invariant for all backends)
+
                 const size_t max_size = ggml_get_max_tensor_size(ctx);
                 ggml_backend_buffer_t buf = ggml_backend_dev_buffer_from_host_ptr(dev, (char *) addr + first, last - first, max_size);
                 if (buf == nullptr) {
@@ -8955,6 +8967,7 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.use_hugepages               =*/ false,
+        /*.gpu_host_import             =*/ LLAMA_GPU_HOST_IMPORT_AUTO,
     };
 
     return result;

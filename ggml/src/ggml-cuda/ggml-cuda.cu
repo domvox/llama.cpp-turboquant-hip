@@ -633,25 +633,11 @@ static enum ggml_status ggml_backend_cuda_buffer_init_tensor(ggml_backend_buffer
         const size_t original_size = ggml_nbytes(tensor);
         const size_t padded_size = ggml_backend_buft_get_alloc_size(buffer->buft, tensor);
 
-        if (padded_size > original_size) {
-            if (ctx->owned) {
-                ggml_cuda_set_device(ctx->device);
-                CUDA_CHECK(cudaMemset((char *)tensor->data + original_size, 0, padded_size - original_size));
-            } else {
-                // Externally-owned buffer (buffer_from_host_ptr): the GPU-side
-                // cudaMemset is unusable here because hipMemset through a
-                // hipHostGetDevicePointer-derived address is unsupported on
-                // GFX1151 / ROCm 7.2.0 (Mapped regions are effectively
-                // read-only from the GPU side). Zero the padding via the
-                // host-side mapping instead — the caller's host buffer must
-                // be writable through the end of all init_tensor calls. The
-                // hugepages loader satisfies this by mapping PROT_READ|
-                // PROT_WRITE during load and downgrading to PROT_READ after
-                // load_all_data completes.
-                const size_t pad_offset = (size_t)((const char *)tensor->data + original_size
-                                                   - (const char *)ctx->dev_ptr);
-                memset((uint8_t *)ctx->host_ptr + pad_offset, 0, padded_size - original_size);
-            }
+        // As some backend(s) cannot safely memset via device alias (e.g., GFX1151 / ROCm 7.2.0), padding for extern buffer is zero-filled
+        // in the loader. Mapped regions are effectively readonly from the GPU, and host buffer protection may prevent writes.
+        if (padded_size > original_size && ctx->owned) {
+            ggml_cuda_set_device(ctx->device);
+            CUDA_CHECK(cudaMemset((char *)tensor->data + original_size, 0, padded_size - original_size));
         }
     }
     return GGML_STATUS_SUCCESS;
@@ -749,20 +735,37 @@ static const ggml_backend_buffer_i ggml_backend_cuda_buffer_interface = {
     /* .reset           = */ NULL,
 };
 
-// Buffer interface for externally-owned (buffer_from_host_ptr) buffers.
-// The underlying host memory is read-only (mmap'd PROT_READ on Linux, and
-// hipHostRegister+Mapped regions are effectively read-only from the GPU
-// side on GFX1151 / ROCm 7.2.0 regardless of flags). Write ops are NULL'd
-// to enforce read-only semantics at the type level.
+static void ggml_backend_cuda_imported_buffer_set_tensor(
+    ggml_backend_buffer_t, ggml_tensor *, const void *, size_t, size_t) {
+    GGML_ABORT("ggml-cuda: imported buffer is read-only (set_tensor not supported)");
+}
+
+static void ggml_backend_cuda_imported_buffer_memset_tensor(
+    ggml_backend_buffer_t, ggml_tensor *, uint8_t, size_t, size_t) {
+    GGML_ABORT("ggml-cuda: imported buffer is read-only (memset_tensor not supported)");
+}
+
+static bool ggml_backend_cuda_imported_buffer_cpy_tensor(
+    ggml_backend_buffer_t, const ggml_tensor *, ggml_tensor *) {
+    GGML_ABORT("ggml-cuda: imported buffer is read-only (cpy_tensor not supported)");
+}
+
+static void ggml_backend_cuda_imported_buffer_clear(
+    ggml_backend_buffer_t, uint8_t) {
+    GGML_ABORT("ggml-cuda: imported buffer is read-only (clear_tensor not supported)");
+}
+
+// Buffer interface for external (buffer_from_host_ptr) buffers. Host memory is read-only (mmap'd PROT_READ on Linux), and  hipHostRegister+Mapped
+// regions are effectively read-only from some GPU(s) (e.g., GFX1151 / ROCm 7.2.0) regardless of flags. Writes trigger an abort to enforce semantics.
 static const ggml_backend_buffer_i ggml_backend_cuda_imported_buffer_interface = {
     /* .free_buffer     = */ ggml_backend_cuda_buffer_free_buffer,
     /* .get_base        = */ ggml_backend_cuda_buffer_get_base,
     /* .init_tensor     = */ ggml_backend_cuda_buffer_init_tensor,
-    /* .memset_tensor   = */ NULL,
-    /* .set_tensor      = */ NULL,
+    /* .memset_tensor   = */ ggml_backend_cuda_imported_buffer_memset_tensor,
+    /* .set_tensor      = */ ggml_backend_cuda_imported_buffer_set_tensor,
     /* .get_tensor      = */ ggml_backend_cuda_buffer_get_tensor,
-    /* .cpy_tensor      = */ NULL,
-    /* .clear           = */ NULL,
+    /* .cpy_tensor      = */ ggml_backend_cuda_imported_buffer_cpy_tensor,
+    /* .clear           = */ ggml_backend_cuda_imported_buffer_clear,
     /* .reset           = */ NULL,
 };
 
@@ -4744,13 +4747,8 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
     bool events = true;
 #endif
 
-    // buffer_from_host_ptr is currently enabled only on HIP integrated GPUs
-    // (validated on Strix Halo / ROCm 7.2.0). NVIDIA Jetson reports
-    // prop.integrated == 1 too and may benefit from the same path, but it
-    // has not been tested on that platform; #15034's cuda_host-buffer
-    // corruption is in a different code path (see ggml-cuda.cu:243) and
-    // is not expected to apply here, but validation is required before
-    // extending beyond HIP.
+    // buffer_from_host_ptr is currently enabled only on HIP integrated GPUs (validated on Strix Halo). NVIDIA Jetson may benefit from this
+    // path but has not been tested; its host-buffer corruption is separate, but validation is required before extending beyond HIP.
     bool buffer_from_host_ptr = false;
 #if defined(GGML_USE_HIP)
     cudaDeviceProp prop;
@@ -4783,18 +4781,10 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
 }
 
 #if defined(GGML_USE_HIP)
-// Import a host-allocated memory region as a GPU-accessible buffer via
-// cudaHostRegister + cudaHostGetDevicePointer. HIP-only for now; only
-// validated on Strix Halo / ROCm 7.2.0. See the capability flag in
-// get_props() for context. TODO: extend to CUDA / Jetson after validating
-// that #15034's corruption mode does not apply to this code path.
+// Import host-allocated memory region as GPU-accessible buffer via cudaHostRegister + cudaHostGetDevicePointer. Only validated on
+// HIP / ROCm 7.2.0; see get_props() for context. TODO: extend to CUDA / Jetson after validating corruption mode does not apply here.
 //
-// PRECONDITION: the caller's host buffer must be writable through the
-// end of all init_tensor calls. The buffer's quantized-tensor padding
-// is zeroed via host-side memset during init_tensor (GPU-side memset
-// is unsupported on GFX1151 / ROCm 7.2.0 for Mapped regions). The
-// hugepages loader satisfies this by mapping PROT_READ|PROT_WRITE
-// during load and downgrading to PROT_READ after load_all_data.
+// Loader ensures quantized-tensor padding bytes are zerod in host buffer before calling; already handled for hugepages and file mmap.
 static ggml_backend_buffer_t ggml_backend_cuda_device_buffer_from_host_ptr(
         ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
     GGML_UNUSED(max_tensor_size);
@@ -4808,15 +4798,11 @@ static ggml_backend_buffer_t ggml_backend_cuda_device_buffer_from_host_ptr(
         return nullptr;
     }
 
-    // ReadOnly is intentionally not set: empirically, hipHostRegisterReadOnly
-    // on GFX1151 / ROCm 7.2.0 incurs a ~14% TG regression vs Portable|Mapped
-    // alone (measured on Qwen3-30B-A3B Q4_K_M, 2026-04-25). The host-side
-    // mmap is PROT_READ after the loader finalizes; the imported buffer
-    // interface enforces read-only access at the type level by NULLing
-    // write ops, so ReadOnly adds no contract enforcement we don't
-    // already have. Its only observable effect is the regression.
-    cudaError_t err = cudaHostRegister(ptr, size,
-        cudaHostRegisterPortable | cudaHostRegisterMapped);
+    // ReadOnly is intentionally absent: empirically, hipHostRegisterReadOnly on some platforms incur a performance penalty vs Portable|Mapped
+    // alone (e.g., GFX1151 / ROCm 7.2.0 penalty is ~14% of TG on Qwen3 30B Q4_K_M). Host-side  mmap is PROT_READ after loader finalizes; the
+    // imported buffer interface enforces read-only access at the type level by aborting on calls to write ops to enforce contract semantics.
+    cudaError_t err = cudaHostRegister(ptr, size, cudaHostRegisterPortable | cudaHostRegisterMapped);
+
     if (err != cudaSuccess) {
         (void)cudaGetLastError();
         GGML_LOG_ERROR("%s: cudaHostRegister failed: %s\n", __func__, cudaGetErrorString(err));

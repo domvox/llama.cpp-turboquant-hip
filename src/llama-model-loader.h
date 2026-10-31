@@ -192,6 +192,9 @@ struct llama_model_loader {
 
     void get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const;
 
+    // Ensure quantized-tensor padding bytes are zero in file-ifx-th mapped region.
+    void zero_padding_in_mapping(uint32_t idx, struct ggml_context * ctx, ggml_backend_buffer_type_t buft);
+
     // for backwards compatibility, does not support ggml-backend
     void load_data_for(struct ggml_tensor * cur) const;
 

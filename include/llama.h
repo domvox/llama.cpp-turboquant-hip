@@ -198,6 +198,14 @@ extern "C" {
         LLAMA_SPLIT_MODE_ROW   = 2, // split layers and KV across GPUs, use tensor parallelism if supported
     };
 
+    // Support for buffer from host pages; allows passing of pages to GPU on unified memory systems.
+    // Needed to avoid double memory and copy with some memory modes (e.g., Linux humepages with preallocation)
+    enum llama_gpu_host_import_mode {
+        LLAMA_GPU_HOST_IMPORT_AUTO = 0, // on by default if and only if use_hugepages is active
+        LLAMA_GPU_HOST_IMPORT_ON   = 1, // forced on
+        LLAMA_GPU_HOST_IMPORT_OFF  = 2, // forced off
+    };
+
     // TODO: simplify (https://github.com/ggml-org/llama.cpp/pull/9294#pullrequestreview-2286561979)
     typedef struct llama_token_data {
         llama_token id; // token id
@@ -320,6 +328,8 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool use_hugepages;   // back model memory with anonymous hugetlb pages (Linux only)
+
+        enum llama_gpu_host_import_mode gpu_host_import; // whether loader imports weights via buffer_from_host_ptr (default: auto)
     };
 
     struct llama_sampler_seq_config {

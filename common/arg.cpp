@@ -2250,6 +2250,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_HUGEPAGES"));
     add_opt(common_arg(
+        {"--gpu-host-import"},
+        {"--no-gpu-host-import"},
+        "import model weights to the GPU via host-pointer aliasing (buffer_from_host_ptr) in lieu of separate device buffer.\n"
+        "requires backend capability (e.g., HIP on integrated APUs). automatically enabled with --hugepages and disabled otherwise",
+        [](common_params & params, bool value) {
+            params.gpu_host_import = value ? LLAMA_GPU_HOST_IMPORT_ON : LLAMA_GPU_HOST_IMPORT_OFF;
+        }
+    ).set_env("LLAMA_ARG_GPU_HOST_IMPORT"));
+    add_opt(common_arg(
         {"-dio", "--direct-io"},
         {"-ndio", "--no-direct-io"},
         string_format("use DirectIO if available. (default: %s)", params.use_direct_io ? "enabled" : "disabled"),
