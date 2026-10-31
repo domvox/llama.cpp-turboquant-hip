@@ -22,16 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Free disk space
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+
       - name: Set up s390x emulation
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
         with:
           image: tonistiigi/binfmt:qemu-v10.2.1
           platforms: s390x
-
-      - name: Free disk space
-        uses: ggml-org/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
 
       - name: Verify s390x execution
         run: |
