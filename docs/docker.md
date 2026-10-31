@@ -40,6 +40,24 @@ Additionally, there the following images, similar to the above:
 
 The GPU enabled images are not currently tested by CI beyond being built. They are not built with any variation from the ones in the Dockerfiles defined in [.devops/](../.devops/) and the GitHub Action defined in [.github/workflows/docker.yml](../.github/workflows/docker.yml). If you need different settings (for example, a different CUDA, ROCm or MUSA library, you'll need to build the images locally for now).
 
+## Publishing in this repository
+
+The `Publish Docker image` workflow publishes to `ghcr.io/<owner>/<repository>`.
+Scheduled runs select `core`: CPU (amd64 and arm64), CUDA, ROCm, Intel, Vulkan
+and OpenVINO. Core publication does not depend on MUSA or s390x.
+
+For an optional publication, manually run the workflow with `variant=musa` or
+`variant=s390x`. Each selection runs its own build and manifest jobs; failures
+remain visible as failed runs. Optional runs only update their own `full-*`,
+`light-*`, `server-*` and source-versioned tags. They never update the shared
+CPU tags. In this repository, newly published shared CPU tags support amd64 and
+arm64; s390x consumers must use the separate `*-s390x` tags.
+
+Before selecting s390x, provision a compatible Docker/Buildx runner with the
+`ubuntu-24.04-s390x` label. The label alone does not provision a runner.
+Old optional tags remain unchanged until a successful optional publication;
+a historical tag is not evidence of a current successful build.
+
 ## Usage
 
 The easiest way to download the models, convert them to ggml and optimize them is with the --all-in-one command which includes the full docker image.

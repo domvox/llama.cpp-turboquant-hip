@@ -10,9 +10,18 @@
 name: Publish Docker image
 
 on:
-  workflow_dispatch: # allows manual triggering
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Publication group (optional variants run independently of core)'
+        type: choice
+        default: core
+        options:
+          - core
+          - musa
+          - s390x
   schedule:
-    # Rebuild daily rather than on every push because it is expensive
+    # Only core is scheduled. MUSA and s390x are manual, independent runs.
     - cron: '12 4 * * *'
 
 concurrency:
@@ -49,9 +58,15 @@ jobs:
       - name: Create and push git tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_TAG: ${{ steps.srctag.outputs.name }}
         run: |
-          git tag ${{ steps.srctag.outputs.name }} || exit 0
-          git push origin ${{ steps.srctag.outputs.name }} || exit 0
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/$SOURCE_TAG"; then
+            test "$(git rev-parse "$SOURCE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          else
+            git tag "$SOURCE_TAG"
+          fi
+          git push origin "refs/tags/$SOURCE_TAG"
 
   prepare_matrices:
     name: Prepare Docker matrices
@@ -63,6 +78,8 @@ jobs:
     steps:
       - name: Generate build and merge matrices
         id: matrices
+        env:
+          DOCKER_VARIANT: ${{ inputs.variant || 'core' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -72,7 +89,7 @@ jobs:
           [
             { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" },
             { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "cpu", "dockerfile": ".devops/s390x.Dockerfile", "platforms": "linux/s390x", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-s390x" },
+            { "tag": "s390x", "dockerfile": ".devops/s390x.Dockerfile", "platforms": "linux/s390x", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-s390x" },
             { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
             { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04-arm" },
             { "tag": "cuda13", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "13.1.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
@@ -85,6 +102,20 @@ jobs:
             { "tag": "openvino", "dockerfile": ".devops/openvino.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" }
           ]
           JSON
+
+          # s390x requires a provisioned runner with the ubuntu-24.04-s390x label.
+          # Optional variants must never join core's matrix or CPU manifests.
+          # Each manual run selects just one group, including its merge stage.
+          case "$DOCKER_VARIANT" in
+            core|musa|s390x) ;;
+            *) echo "Unknown Docker variant: $DOCKER_VARIANT" >&2; exit 1 ;;
+          esac
+          jq --arg variant "$DOCKER_VARIANT" '
+            map(select(if $variant == "core" then
+              (.tag != "musa" and .tag != "s390x")
+            else .tag == $variant end))
+          ' build-matrix.json > selected-matrix.json
+          mv selected-matrix.json build-matrix.json
 
           BUILD_MATRIX="$(jq -c . build-matrix.json)"
           MERGE_MATRIX="$(jq -c '
@@ -101,20 +132,6 @@ jobs:
               | .server = (.server or ($entry.server // false))
               | .arches += [($entry.platforms | sub("^linux/"; ""))]
             ))
-            # Backward compatibility: s390x tags are aliases of cpu for the linux/s390x platform.
-            | if (has("cpu") and (((.cpu.arches // []) | index("s390x")) != null)) then
-                . + {
-                  s390x: {
-                    tag: "s390x",
-                    arches: ["s390x"],
-                    full: .cpu.full,
-                    light: .cpu.light,
-                    server: .cpu.server
-                  }
-                }
-              else
-                .
-              end
             | [.[] | .arches = (.arches | unique | sort | join(" "))]
           ' build-matrix.json)"
 
@@ -382,11 +399,6 @@ jobs:
               local digest
 
               digest="$(awk -F '\t' -v t="$tag_name" -v a="$arch" -v i="$image_type" '$1 == t && $2 == a && $3 == i { print $4; exit }' ${DIGEST_GLOB})"
-
-              # Backward compatibility: s390x tags are aliases of cpu for the linux/s390x platform.
-              if [[ -z "$digest" && "$tag_name" == "s390x" && "$arch" == "s390x" ]]; then
-                digest="$(awk -F '\t' -v t="cpu" -v a="$arch" -v i="$image_type" '$1 == t && $2 == a && $3 == i { print $4; exit }' ${DIGEST_GLOB})"
-              fi
 
               if [[ -z "$digest" ]]; then
                 echo "Missing digest for tag=${tag_name} arch=${arch} image_type=${image_type}" >&2
