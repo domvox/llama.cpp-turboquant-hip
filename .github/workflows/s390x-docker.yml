@@ -1,0 +1,57 @@
+name: s390x Docker build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/s390x-docker.yml'
+      - '.github/workflows/docker.yml'
+      - '.devops/s390x.Dockerfile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s390x-docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+
+      - name: Set up s390x emulation
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.1
+          platforms: s390x
+
+      - name: Verify s390x execution
+        run: |
+          test "$(docker run --rm --platform linux/s390x ubuntu:24.04 uname -m)" = s390x
+
+      - name: Build s390x images without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in light server full; do
+            docker build --progress=plain --platform linux/s390x \
+              --file .devops/s390x.Dockerfile --target "$target" \
+              --tag "llama-s390x:${target}" .
+            test "$(docker image inspect --format '{{.Architecture}}' "llama-s390x:${target}")" = s390x
+          done
+
+      - name: Smoke test s390x binaries under emulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/s390x llama-s390x:light --version
+          docker run --rm --platform linux/s390x llama-s390x:server --version
+          docker run --rm --platform linux/s390x --entrypoint /app/llama-cli llama-s390x:full --version

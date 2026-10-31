@@ -53,8 +53,9 @@ remain visible as failed runs. Optional runs only update their own `full-*`,
 CPU tags. In this repository, newly published shared CPU tags support amd64 and
 arm64; s390x consumers must use the separate `*-s390x` tags.
 
-Before selecting s390x, provision a compatible Docker/Buildx runner with the
-`ubuntu-24.04-s390x` label. The label alone does not provision a runner.
+s390x builds run on a GitHub-hosted `ubuntu-24.04` runner using QEMU. No native
+s390x runner is required. Emulated builds can be substantially slower than
+native builds.
 Old optional tags remain unchanged until a successful optional publication;
 a historical tag is not evidence of a current successful build.
 
