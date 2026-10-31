@@ -1846,6 +1846,129 @@ static void func_args_not_string(json & messages) {
 
 }
 
+// MiniMax M2 format: uses <minimax:tool_call>...<invoke name="tool_name"><parameter name="key">value</parameter>...</invoke>...</minimax:tool_call>
+// - Reasoning: <think>{reasoning}</think> (optional)
+static common_chat_params common_chat_params_init_minimax(const common_chat_template &    tmpl,
+                                                           const autoparser::generation_params & inputs) {
+    common_chat_params data;
+
+    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+    data.preserved_tokens   = {
+        "<minimax:tool_call>",
+        "</minimax:tool_call>",
+        "<think>",
+        "</think>",
+    };
+
+    auto has_tools         = inputs.tools.is_array() && !inputs.tools.empty();
+    auto extract_reasoning = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+    auto include_grammar   = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+
+    const std::string TC_START   = "<minimax:tool_call>";
+    const std::string TC_END     = "</minimax:tool_call>";
+    const std::string THINK_START = "<think>";
+    const std::string THINK_END   = "</think>";
+
+    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        auto end = p.end();
+
+        // Reasoning extraction (same pattern as Kimi K2)
+        auto reasoning = extract_reasoning ? p.optional(THINK_START + p.reasoning(
+            p.until_one_of({ THINK_END, TC_START })) +
+            p.optional(p.literal(THINK_END))) : p.eps();
+        auto generation_prompt = p.prefix(inputs.generation_prompt, THINK_START);
+
+        // Content only parser (no tools)
+        if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
+            return generation_prompt + reasoning + p.content(p.rest()) + end;
+        }
+
+        // Build tool call parsers for each available function
+        // MiniMax format: <invoke name="tool_name"><parameter name="key">value</parameter>...</invoke>
+        auto tool_choice = p.choice();
+        foreach_function(inputs.tools, [&](const json & tool) {
+            const auto & function = tool.at("function");
+            std::string  name     = function.at("name");
+            const auto & params   = function.at("parameters");
+
+            // Build parameter parsers
+            auto arg_choice = p.choice();
+            if (params.contains("properties") && !params["properties"].empty()) {
+                for (const auto & el : params["properties"].items()) {
+                    const std::string & prop_name = el.key();
+                    const auto & prop_def = el.value();
+                    bool is_string_type = (prop_def.contains("type") && prop_def["type"] == "string");
+
+                    // <parameter name="prop_name">value</parameter>
+                    auto arg_rule = p.tool_arg(
+                        p.tool_arg_open(p.literal("<parameter name=\"")) +
+                        p.tool_arg_name(p.literal(prop_name)) +
+                        p.literal("\">") +
+                        (is_string_type
+                            ? p.tool_arg_string_value(p.until("</parameter>"))
+                            : p.tool_arg_value(p.until("</parameter>"))) +
+                        p.tool_arg_close(p.literal("</parameter>"))
+                    );
+                    arg_choice |= arg_rule;
+                }
+            }
+            auto args = p.zero_or_more(p.space() + arg_choice);
+
+            // <invoke name="tool_name">...params...</invoke>
+            auto tool_parser = p.tool(
+                p.tool_open(
+                    p.literal("<invoke name=\"") +
+                    p.tool_name(p.literal(name)) +
+                    p.literal("\">")
+                ) +
+                p.tool_args(args) +
+                p.space() +
+                p.tool_close(p.literal("</invoke>"))
+            );
+
+            tool_choice |= p.rule("tool-" + name, tool_parser);
+        });
+
+        // Tool calls section: <minimax:tool_call>\n...tool calls...\n</minimax:tool_call>
+        auto min_calls  = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? 1 : 0;
+        auto max_calls  = inputs.parallel_tool_calls ? -1 : 1;
+        auto tool_calls = p.rule("tool-calls",
+            p.trigger_rule("tool-call",
+                p.literal(TC_START) + p.space() +
+                p.repeat(tool_choice + p.space(), min_calls, max_calls) +
+                p.optional(p.literal(TC_END)))
+        );
+
+        auto content_before_tools = p.content(p.until_one_of({ TC_START }));
+
+        return generation_prompt + reasoning + content_before_tools + tool_calls + end;
+    });
+
+    data.parser = parser.save();
+
+    if (include_grammar) {
+        data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
+        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
+            foreach_function(inputs.tools, [&](const json & tool) {
+                const auto & function = tool.at("function");
+                auto         schema   = function.at("parameters");
+                builder.resolve_refs(schema);
+            });
+            parser.build_grammar(builder, data.grammar_lazy);
+        });
+
+        data.grammar_triggers = {
+            { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, "<minimax:tool_call>" }
+        };
+    }
+
+    return data;
+}
+
 static json common_chat_extra_context() {
     json ctx = json::object();
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
@@ -1910,6 +2033,13 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|function_call|>") == std::string::npos) {
         LOG_DBG("Using specialized template: GigaChatV3\n");
         return common_chat_params_init_gigachat_v3(tmpl, params);
+    }
+
+    // MiniMax M2 format detection
+    if (src.find("<minimax:tool_call>") != std::string::npos &&
+        src.find("<invoke name=") != std::string::npos) {
+        LOG_DBG("Using specialized template: MiniMax M2\n");
+        return common_chat_params_init_minimax(tmpl, params);
     }
 
     // Gemma4 format detection
