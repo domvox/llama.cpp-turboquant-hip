@@ -89,7 +89,7 @@ jobs:
           [
             { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" },
             { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "s390x", "dockerfile": ".devops/s390x.Dockerfile", "platforms": "linux/s390x", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-s390x" },
+            { "tag": "s390x", "dockerfile": ".devops/s390x.Dockerfile", "platforms": "linux/s390x", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" },
             { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
             { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04-arm" },
             { "tag": "cuda13", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "13.1.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
@@ -103,7 +103,7 @@ jobs:
           ]
           JSON
 
-          # s390x requires a provisioned runner with the ubuntu-24.04-s390x label.
+          # s390x uses QEMU on a hosted amd64 runner; no native runner is required.
           # Optional variants must never join core's matrix or CPU manifests.
           # Each manual run selects just one group, including its merge stage.
           case "$DOCKER_VARIANT" in
@@ -155,7 +155,7 @@ jobs:
           ref: ${{ needs.create_tag.outputs.source_tag }}
 
       - name: Set up QEMU
-        if: ${{ contains(matrix.config.platforms, 'linux/amd64') }}
+        if: ${{ contains(matrix.config.platforms, 'linux/amd64') || matrix.config.platforms == 'linux/s390x' }}
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
         with:
           image: tonistiigi/binfmt:qemu-v10.2.1
